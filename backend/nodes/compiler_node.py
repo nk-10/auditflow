@@ -1,7 +1,10 @@
 """Compiler node for generating the final security analysis report."""
 
+import logging
 from backend.utils.report_generator import ReportGenerator
 from backend.types import AnalysisState
+
+logger = logging.getLogger(__name__)
 
 
 def compiler_node(state: AnalysisState) -> AnalysisState:
@@ -23,6 +26,11 @@ def compiler_node(state: AnalysisState) -> AnalysisState:
         analyzed_files = file_structure.get("analyzed_files", 0)
         total_files = file_structure.get("total_files_in_repo", 0)
 
+        logger.info(
+            "Compiler node generating report for %s with %d findings",
+            repo_url,
+            len(findings),
+        )
         # Generate report
         report = ReportGenerator.generate_report(
             repo_url=repo_url,
@@ -36,10 +44,12 @@ def compiler_node(state: AnalysisState) -> AnalysisState:
         # Update state with report
         state["analysis_report"] = report
         state["error"] = None
+        logger.info("Compiler node completed report generation for %s", repo_url)
 
         return state
 
     except Exception as e:
         state["error"] = f"Report generation error: {str(e)}"
         state["analysis_report"] = "Failed to generate report"
+        logger.error("Compiler node failed: %s", e, exc_info=True)
         return state

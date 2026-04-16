@@ -1,3 +1,4 @@
+import logging
 import os
 from pydantic_settings import BaseSettings
 
@@ -33,9 +34,19 @@ class Settings(BaseSettings):
     # Feature flags
     enable_cors: bool = True
     debug: bool = os.getenv("DEBUG", "false").lower() == "true"
+    log_level: str = os.getenv(
+        "LOG_LEVEL",
+        "DEBUG" if os.getenv("DEBUG", "false").lower() == "true" else "INFO",
+    )
 
     class Config:
         env_file = ".env"
 
 
 settings = Settings()
+logging.basicConfig(
+    level=getattr(logging, settings.log_level.upper(), logging.INFO),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logging.getLogger().setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
+logger = logging.getLogger("auditflow")

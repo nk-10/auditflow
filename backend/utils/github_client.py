@@ -1,11 +1,13 @@
 """GitHub API client for fetching repository contents."""
 
+import logging
 import re
 from typing import Optional
 from github import Github, GithubException
-from urllib.parse import urlparse
 
 from backend.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class GitHubClient:
@@ -32,6 +34,7 @@ class GitHubClient:
         Raises:
             ValueError: If URL is invalid
         """
+        logger.debug("Parsing GitHub repository URL: %s", url)
         # Handle various URL formats
         url = url.strip().rstrip("/")
 
@@ -40,6 +43,7 @@ class GitHubClient:
         if match:
             return match.group(1), match.group(2)
 
+        logger.error("Invalid GitHub repository URL: %s", url)
         raise ValueError(f"Invalid GitHub repository URL: {url}")
 
     def get_repo_structure(self, repo_url: str) -> dict:
@@ -51,6 +55,7 @@ class GitHubClient:
         Returns:
             Dictionary with file structure and contents
         """
+        logger.info("Fetching repository structure for %s", repo_url)
         try:
             owner, repo_name = self.parse_repo_url(repo_url)
             repo = self.client.get_user(owner).get_repo(repo_name)
@@ -103,8 +108,20 @@ class GitHubClient:
                                         }
                                     )
                                     files_analyzed += 1
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    logger.warning(
+                                        "Skipping file %s due to decoding error: %s",
+                                        file_path,
+                                        e,
+                                        exc_info=True,
+                                    )
+                            else:
+                                logger.debug(
+                                    "Skipping file %s size=%d analyze=%s",
+                                    file_path,
+                                    content.size,
+                                    self._should_analyze_file(file_path),
+                                )
                         elif content.type == "dir" and files_analyzed < max_files:
                             # Recursively get directory contents
                             get_contents_recursive(content.path)
@@ -116,12 +133,29 @@ class GitHubClient:
             # Start recursive fetch from root
             get_contents_recursive()
             repo_info["analyzed_files"] = files_analyzed
-
+            logger.info(
+                "Fetched repository structure for %s: total_files=%d analyzed_files=%d",
+                repo_url,
+                repo_info["total_files_in_repo"],
+                repo_info["analyzed_files"],
+            )
             return repo_info
 
         except GithubException as e:
+            logger.error(
+                "GitHub API error while fetching repository %s: %s",
+                repo_url,
+                e,
+                exc_info=True,
+            )
             raise ValueError(f"GitHub API error: {e.data.get('message', str(e))}")
         except Exception as e:
+            logger.error(
+                "Error fetching repository %s: %s",
+                repo_url,
+                e,
+                exc_info=True,
+            )
             raise ValueError(f"Error fetching repository: {str(e)}")
 
     @staticmethod

@@ -1,10 +1,13 @@
 """Streamlit frontend for the Autonomous Codebase Librarian."""
 
+import logging
 import streamlit as st
 import requests
 import time
 from datetime import datetime
 import os
+
+logger = logging.getLogger(__name__)
 
 # Page configuration
 st.set_page_config(
@@ -60,6 +63,7 @@ st.markdown(
 
 # Get backend URL from environment or use default
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+logger.info("Streamlit frontend configured with BACKEND_URL=%s", BACKEND_URL)
 
 # Initialize session state
 if "thread_id" not in st.session_state:
@@ -72,17 +76,20 @@ if "analysis_data" not in st.session_state:
 
 def get_status(thread_id: str) -> dict:
     """Check analysis status."""
+    logger.info("Checking status for thread_id=%s", thread_id)
     try:
         response = requests.get(f"{BACKEND_URL}/status/{thread_id}")
         response.raise_for_status()
         return response.json()
     except Exception as e:
+        logger.error("Error checking status for thread_id=%s: %s", thread_id, e, exc_info=True)
         st.error(f"Error checking status: {e}")
         return None
 
 
 def submit_approval(thread_id: str, approved: bool) -> dict:
     """Submit approval decision."""
+    logger.info("Submitting approval for thread_id=%s approved=%s", thread_id, approved)
     try:
         response = requests.post(
             f"{BACKEND_URL}/approve",
@@ -91,12 +98,14 @@ def submit_approval(thread_id: str, approved: bool) -> dict:
         response.raise_for_status()
         return response.json()
     except Exception as e:
+        logger.error("Error submitting approval for thread_id=%s: %s", thread_id, e, exc_info=True)
         st.error(f"Error submitting approval: {e}")
         return None
 
 
 def start_analysis(repo_url: str) -> dict:
     """Start a new analysis."""
+    logger.info("Starting analysis for repo_url=%s", repo_url)
     try:
         response = requests.post(
             f"{BACKEND_URL}/analyze",
@@ -105,6 +114,7 @@ def start_analysis(repo_url: str) -> dict:
         response.raise_for_status()
         return response.json()
     except Exception as e:
+        logger.error("Error starting analysis for repo_url=%s: %s", repo_url, e, exc_info=True)
         st.error(f"Error starting analysis: {e}")
         return None
 

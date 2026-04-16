@@ -1,7 +1,10 @@
 """Human review node that interrupts the workflow for approval."""
 
+import logging
 from langgraph.types import interrupt
 from backend.types import AnalysisState
+
+logger = logging.getLogger(__name__)
 
 
 def human_review_node(state: AnalysisState) -> AnalysisState:
@@ -35,6 +38,11 @@ Total Findings: {len(findings)}
 Please review the findings and approve or reject the report generation.
 """
 
+    logger.info(
+        "Human review required for repo_url=%s with total findings=%d",
+        state.get("repo_url", "unknown"),
+        len(findings),
+    )
     # Interrupt with findings for human review
     interrupt(
         {

@@ -1,7 +1,9 @@
 """Report generator for creating professional security analysis reports."""
 
+import logging
 from datetime import datetime
-from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ReportGenerator:

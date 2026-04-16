@@ -1,5 +1,6 @@
 """FastAPI backend for the Autonomous Codebase Librarian."""
 
+import logging
 import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
@@ -8,6 +9,8 @@ from pydantic import BaseModel
 
 from backend.config import settings
 from backend.graph import workflow, AnalysisState
+
+logger = logging.getLogger(__name__)
 
 
 # Request/Response models
@@ -104,8 +107,10 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
     """
     try:
         if not request.repo_url:
+            logger.warning("Analyze request missing repo_url")
             raise HTTPException(status_code=400, detail="Repository URL is required")
 
+        logger.info("Starting analysis for repo_url=%s", request.repo_url)
         # Generate unique thread ID
         thread_id = str(uuid.uuid4())
 
@@ -145,6 +150,12 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(
+            "Error starting analysis for repo_url=%s: %s",
+            request.repo_url,
+            e,
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=500, detail=f"Error starting analysis: {str(e)}"
         )
@@ -165,6 +176,7 @@ async def check_status(thread_id: str) -> StatusResponse:
         state_snapshot = workflow.get_state({"configurable": {"thread_id": thread_id}})
 
         if not state_snapshot:
+            logger.warning("Status request for missing thread_id=%s", thread_id)
             raise HTTPException(status_code=404, detail="Thread not found")
 
         state = state_snapshot.values
@@ -206,6 +218,9 @@ async def check_status(thread_id: str) -> StatusResponse:
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(
+            "Error checking status for thread_id=%s: %s", thread_id, e, exc_info=True
+        )
         raise HTTPException(status_code=500, detail=f"Error checking status: {str(e)}")
 
 
@@ -226,6 +241,9 @@ async def submit_approval(request: ApprovalRequest) -> ApprovalResponse:
         )
 
         if not state_snapshot:
+            logger.warning(
+                "Approval request for missing thread_id=%s", request.thread_id
+            )
             raise HTTPException(status_code=404, detail="Thread not found")
 
         state = state_snapshot.values
@@ -234,6 +252,9 @@ async def submit_approval(request: ApprovalRequest) -> ApprovalResponse:
         state["is_approved"] = request.approved
 
         if request.approved:
+            logger.info(
+                "Approval received for thread_id=%s: approved", request.thread_id
+            )
             # Resume workflow to continue to compiler node
             try:
                 workflow.invoke(
@@ -241,9 +262,12 @@ async def submit_approval(request: ApprovalRequest) -> ApprovalResponse:
                 )
             except Exception as e:
                 if "interrupt" not in str(type(e).__name__).lower():
-                    # Check if this is just workflow completion
-                    pass
-
+                    logger.error(
+                        "Error resuming workflow for thread_id=%s: %s",
+                        request.thread_id,
+                        e,
+                        exc_info=True,
+                    )
             # Get updated state with report
             final_state_snapshot = workflow.get_state(
                 {"configurable": {"thread_id": request.thread_id}}
@@ -257,7 +281,9 @@ async def submit_approval(request: ApprovalRequest) -> ApprovalResponse:
                 findings=final_state.get("security_findings", []),
             )
         else:
-            # If rejected, end the workflow
+            logger.info(
+                "Approval received for thread_id=%s: rejected", request.thread_id
+            )
             return ApprovalResponse(
                 thread_id=request.thread_id,
                 status="rejected",
@@ -268,6 +294,12 @@ async def submit_approval(request: ApprovalRequest) -> ApprovalResponse:
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(
+            "Error processing approval for thread_id=%s: %s",
+            request.thread_id,
+            e,
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=500, detail=f"Error processing approval: {str(e)}"
         )

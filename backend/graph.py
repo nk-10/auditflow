@@ -1,13 +1,15 @@
 """LangGraph workflow definition for the Autonomous Codebase Librarian."""
 
+import logging
 from langgraph.graph import StateGraph, START, END
-from langgraph.types import interrupt
 from langgraph.checkpoint.memory import MemorySaver
 from backend.types import AnalysisState
 from backend.nodes.scanner_node import scanner_node
 from backend.nodes.security_node import security_node
 from backend.nodes.human_review_node import human_review_node
 from backend.nodes.compiler_node import compiler_node
+
+logger = logging.getLogger(__name__)
 
 
 def create_graph():
@@ -42,6 +44,7 @@ def create_graph():
     checkpointer = MemorySaver()
     compiled_graph = graph.compile(checkpointer=checkpointer)
 
+    logger.info("Workflow graph compiled")
     return compiled_graph
 
 

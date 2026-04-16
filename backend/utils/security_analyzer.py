@@ -1,12 +1,14 @@
 """Security analyzer using Groq LLM for vulnerability detection."""
 
 import json
+import logging
 import re
-from typing import Optional
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage
 
 from backend.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class SecurityAnalyzer:
@@ -31,19 +33,24 @@ class SecurityAnalyzer:
             List of security findings
         """
         if not files:
+            logger.info("SecurityAnalyzer called with no files to analyze")
             return []
 
+        logger.info("SecurityAnalyzer analyzing %d files", len(files))
         # Prepare file summary for analysis
         file_summary = self._prepare_file_summary(files)
 
         # Create comprehensive security analysis prompt
         prompt = self._create_analysis_prompt(file_summary)
+        logger.debug("SecurityAnalyzer generated analysis prompt of length %d", len(prompt))
 
         # Get LLM analysis
         response = self.llm.invoke([HumanMessage(content=prompt)])
+        logger.info("SecurityAnalyzer received LLM response")
 
         # Parse findings from response
         findings = self._parse_findings(response.content)
+        logger.info("SecurityAnalyzer parsed %d findings", len(findings))
 
         return findings
 
@@ -173,8 +180,10 @@ Return ONLY valid JSON, no other text."""
             return normalized_findings
 
         except json.JSONDecodeError:
+            logger.error("SecurityAnalyzer JSON parsing error for response: %s", response_text)
             return self._create_default_finding("JSON parsing error", response_text)
         except Exception as e:
+            logger.error("SecurityAnalyzer failed to parse findings: %s", e, exc_info=True)
             return self._create_default_finding(f"Parsing error: {str(e)}", response_text)
 
     @staticmethod
