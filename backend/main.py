@@ -1,15 +1,18 @@
 """FastAPI backend for the Autonomous Codebase Librarian."""
 
+import asyncio
 import logging
+import re
 import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from langgraph.errors import GraphInterrupt
+from langgraph.types import Command
+from pydantic import BaseModel, field_validator
 
 from backend.config import settings
 from backend.graph import workflow, AnalysisState
-from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,18 @@ class AnalyzeRequest(BaseModel):
     """Request model for starting analysis."""
 
     repo_url: str
+
+    @field_validator("repo_url")
+    @classmethod
+    def validate_github_url(cls, v: str) -> str:
+        """Validate that the URL is a well-formed public GitHub repository URL."""
+        v = v.strip().rstrip("/")
+        if not re.match(r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$", v):
+            raise ValueError(
+                "Must be a valid public GitHub repository URL "
+                "(e.g. https://github.com/owner/repo)"
+            )
+        return v
 
 
 class ApprovalRequest(BaseModel):
@@ -107,10 +122,6 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
         Response with thread_id and initial status
     """
     try:
-        if not request.repo_url:
-            logger.warning("Analyze request missing repo_url")
-            raise HTTPException(status_code=400, detail="Repository URL is required")
-
         logger.info("Starting analysis for repo_url=%s", request.repo_url)
         # Generate unique thread ID
         thread_id = str(uuid.uuid4())
@@ -126,20 +137,24 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
             "error": None,
         }
 
-        # Start the workflow (non-blocking, will hit interrupt)
+        # Start the workflow in a thread so it does not block the event loop.
+        # workflow.invoke() is synchronous and can run for minutes (GitHub fetch + LLM).
         try:
-            # Try to invoke the workflow
-            workflow.invoke(initial_state, {"configurable": {"thread_id": thread_id}})
+            await asyncio.to_thread(
+                workflow.invoke,
+                initial_state,
+                {"configurable": {"thread_id": thread_id}},
+            )
+        except GraphInterrupt:
+            # Expected: workflow paused at human_review interrupt
+            pass
         except Exception as e:
-            # Expected: interrupt will be raised
-            if "interrupt" not in str(type(e).__name__).lower():
-                # If it's not an interrupt, it might be an actual error
-                if "error" in str(e).lower():
-                    return AnalyzeResponse(
-                        thread_id=thread_id,
-                        status="error",
-                        message=f"Analysis failed: {str(e)}",
-                    )
+            logger.error("Workflow raised an unexpected error: %s", e, exc_info=True)
+            return AnalyzeResponse(
+                thread_id=thread_id,
+                status="error",
+                message=f"Analysis failed: {str(e)}",
+            )
 
         # If we got here without error, the interrupt paused us
         return AnalyzeResponse(
@@ -191,19 +206,22 @@ async def check_status(thread_id: str) -> StatusResponse:
             "total": len(findings),
         }
 
-        # Determine status
+        # Determine status.
+        # IMPORTANT: check error before file_structure — a failed security_node leaves
+        # file_structure populated but security_findings empty, which would otherwise
+        # return "analyzing" forever and cause the frontend to poll indefinitely.
         if state.get("analysis_report"):
             status = "completed"
             message = "Analysis complete and approved"
         elif state.get("security_findings"):
             status = "awaiting_approval"
             message = "Awaiting human approval of findings"
-        elif state.get("file_structure"):
-            status = "analyzing"
-            message = "Security analysis in progress"
         elif state.get("error"):
             status = "error"
             message = state.get("error")
+        elif state.get("file_structure"):
+            status = "analyzing"
+            message = "Security analysis in progress"
         else:
             status = "scanning"
             message = "Scanning repository structure"
@@ -255,18 +273,21 @@ async def submit_approval(request: ApprovalRequest) -> ApprovalResponse:
             )
             # Resume workflow from the human_review interrupt checkpoint
             try:
-                workflow.invoke(
+                await asyncio.to_thread(
+                    workflow.invoke,
                     Command(resume={"is_approved": True}),
                     {"configurable": {"thread_id": request.thread_id}},
                 )
+            except GraphInterrupt:
+                # Not expected here, but handle defensively
+                pass
             except Exception as e:
-                if "interrupt" not in str(type(e).__name__).lower():
-                    logger.error(
-                        "Error resuming workflow for thread_id=%s: %s",
-                        request.thread_id,
-                        e,
-                        exc_info=True,
-                    )
+                logger.error(
+                    "Error resuming workflow for thread_id=%s: %s",
+                    request.thread_id,
+                    e,
+                    exc_info=True,
+                )
             # Get updated state with report
             final_state_snapshot = workflow.get_state(
                 {"configurable": {"thread_id": request.thread_id}}

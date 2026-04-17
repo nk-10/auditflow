@@ -77,8 +77,15 @@ class GitHubClient:
             max_files = settings.max_files_to_analyze
             max_size = settings.max_file_size_mb * 1024 * 1024
 
-            def get_contents_recursive(directory=""):
+            def get_contents_recursive(directory="", depth=0):
                 nonlocal files_analyzed
+
+                if depth > 20:
+                    logger.warning(
+                        "Max directory depth (20) reached at '%s' — skipping deeper traversal",
+                        directory,
+                    )
+                    return
 
                 if files_analyzed >= max_files:
                     return
@@ -124,7 +131,7 @@ class GitHubClient:
                                 )
                         elif content.type == "dir" and files_analyzed < max_files:
                             # Recursively get directory contents
-                            get_contents_recursive(content.path)
+                            get_contents_recursive(content.path, depth + 1)
 
                 except GithubException as e:
                     if e.status != 409:  # 409 is "Repository is empty"
@@ -148,6 +155,16 @@ class GitHubClient:
                 e,
                 exc_info=True,
             )
+            if e.status in (401, 403, 404):
+                raise ValueError(
+                    "Repository not found or access denied. "
+                    "If this is a private repository, set the GITHUB_TOKEN environment variable."
+                )
+            if e.status == 429:
+                raise ValueError(
+                    "GitHub API rate limit exceeded. "
+                    "Add a GITHUB_TOKEN for a higher rate limit, or wait before retrying."
+                )
             raise ValueError(f"GitHub API error: {e.data.get('message', str(e))}")
         except Exception as e:
             logger.error(

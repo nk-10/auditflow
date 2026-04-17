@@ -5,10 +5,25 @@ import logging
 import re
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage
+from groq import APIStatusError as GroqAPIStatusError
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+    RetryError,
+)
 
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _is_retryable_llm_error(exc: BaseException) -> bool:
+    """Return False for errors where retrying the same payload will never succeed."""
+    if isinstance(exc, GroqAPIStatusError) and exc.status_code == 413:
+        return False  # payload too large — retrying won't shrink the prompt
+    return True
 
 
 class SecurityAnalyzer:
@@ -21,6 +36,7 @@ class SecurityAnalyzer:
             temperature=settings.llm_temperature,
             max_tokens=settings.llm_max_tokens,
             groq_api_key=settings.groq_api_key,
+            request_timeout=60,
         )
 
     def analyze_files(self, files: list[dict]) -> list[dict]:
@@ -44,8 +60,13 @@ class SecurityAnalyzer:
         prompt = self._create_analysis_prompt(file_summary)
         logger.debug("SecurityAnalyzer generated analysis prompt of length %d", len(prompt))
 
-        # Get LLM analysis
-        response = self.llm.invoke([HumanMessage(content=prompt)])
+        # Get LLM analysis — wrapped with retry for transient failures
+        try:
+            response = self._invoke_llm_with_retry([HumanMessage(content=prompt)])
+        except RetryError as exc:
+            raise RuntimeError(
+                "LLM analysis failed after 3 attempts — Groq may be unavailable or rate-limited"
+            ) from exc
         logger.info("SecurityAnalyzer received LLM response")
 
         # Parse findings from response
@@ -53,6 +74,21 @@ class SecurityAnalyzer:
         logger.info("SecurityAnalyzer parsed %d findings", len(findings))
 
         return findings
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception(_is_retryable_llm_error),
+        reraise=False,
+    )
+    def _invoke_llm_with_retry(self, messages: list) -> object:
+        """Invoke the LLM with automatic retry on transient failures.
+
+        Retries up to 3 times with exponential backoff (2s → 30s max).
+        Skips retry for HTTP 413 (payload too large) since the prompt
+        won't change between attempts.
+        """
+        return self.llm.invoke(messages)
 
     def _prepare_file_summary(self, files: list[dict]) -> str:
         """Prepare a summary of files for analysis.
@@ -65,13 +101,12 @@ class SecurityAnalyzer:
         """
         summary_parts = []
 
-        for file_dict in files[:50]:  # Limit to first 50 files to stay within token limits
+        for file_dict in files[: settings.llm_max_files]:
             path = file_dict.get("path", "unknown")
             content = file_dict.get("content", "")
 
-            # Truncate very long files
-            if len(content) > 2000:
-                content = content[:2000] + "\n... [truncated]"
+            if len(content) > settings.llm_max_chars_per_file:
+                content = content[: settings.llm_max_chars_per_file] + "\n... [truncated]"
 
             summary_parts.append(f"FILE: {path}\n{content}\n" + "=" * 40)
 

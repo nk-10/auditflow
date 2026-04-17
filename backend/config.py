@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     llm_model: str = "llama-3.3-70b-versatile"
     llm_temperature: float = 0.3
     llm_max_tokens: int = 4000
+    # Groq free tier: 12k TPM. Budget: ~7k input tokens ≈ 28k chars of file content.
+    # 20 files × 1200 chars = 24k chars ≈ 6k tokens input; 4k output → ~10k total (safe).
+    llm_max_files: int = 20
+    llm_max_chars_per_file: int = 1200
 
     # Feature flags
     enable_cors: bool = True
