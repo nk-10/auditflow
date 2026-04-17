@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from backend.config import settings
 from backend.graph import workflow, AnalysisState
+from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 
@@ -248,17 +249,15 @@ async def submit_approval(request: ApprovalRequest) -> ApprovalResponse:
 
         state = state_snapshot.values
 
-        # Update approval decision
-        state["is_approved"] = request.approved
-
         if request.approved:
             logger.info(
                 "Approval received for thread_id=%s: approved", request.thread_id
             )
-            # Resume workflow to continue to compiler node
+            # Resume workflow from the human_review interrupt checkpoint
             try:
                 workflow.invoke(
-                    state, {"configurable": {"thread_id": request.thread_id}}
+                    Command(resume={"is_approved": True}),
+                    {"configurable": {"thread_id": request.thread_id}},
                 )
             except Exception as e:
                 if "interrupt" not in str(type(e).__name__).lower():

@@ -43,8 +43,8 @@ Please review the findings and approve or reject the report generation.
         state.get("repo_url", "unknown"),
         len(findings),
     )
-    # Interrupt with findings for human review
-    interrupt(
+    # Interrupt with findings for human review; returns the Command(resume=...) payload
+    decision = interrupt(
         {
             "type": "human_review",
             "repo_url": state.get("repo_url", ""),
@@ -60,6 +60,6 @@ Please review the findings and approve or reject the report generation.
         }
     )
 
-    # If we reach here, the interrupt was resumed with a decision
-    # The is_approved flag should be set by the resume logic
-    return state
+    # decision holds the value passed via Command(resume={"is_approved": ...})
+    is_approved = decision.get("is_approved", False) if isinstance(decision, dict) else False
+    return {**state, "is_approved": is_approved}
