@@ -1,0 +1,96 @@
+# .github/workflows/deploy.yml
+# Deploys AuditFlow to AWS EC2 on every push to the main branch.
+
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main          # Trigger only on pushes to main
+  workflow_dispatch:  # Also allow manual runs from the GitHub Actions tab
+
+jobs:
+  deploy:
+    name: Deploy to Production (EC2)
+    runs-on: ubuntu-latest   # Use GitHub's hosted Ubuntu runner (free)
+
+    steps:
+
+      # ── Step 1: Check out code ──────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        # Fetches the full repo so subsequent steps have access to all files
+
+      # ── Step 2: Configure SSH ───────────────────────────────────────────
+      - name: Configure SSH access
+        run: |
+          mkdir -p ~/.ssh
+          # Write the EC2 deploy private key from GitHub Secrets into a file
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Add the EC2 server's host key to known_hosts
+          # This prevents the interactive "are you sure?" SSH prompt that
+          # would hang the CI/CD job indefinitely
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      # ── Step 3: Deploy to EC2 ────────────────────────────────────────────
+      - name: Deploy application to EC2
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=no \
+              ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} \
+              'bash -s' << 'DEPLOY_SCRIPT'
+
+            # Exit immediately if any command returns a non-zero exit code
+            # This ensures the deployment fails loudly rather than silently
+            set -e
+
+            echo "=== [1/5] Navigating to application directory ==="
+            cd /opt/auditflow
+
+            echo "=== [2/5] Pulling latest code from main branch ==="
+            git fetch origin main
+            # Hard reset ensures the server exactly matches the remote,
+            # even if someone manually edited files on the server
+            git reset --hard origin/main
+
+            echo "=== [3/5] Installing/updating Python dependencies ==="
+            source venv/bin/activate
+            pip install --quiet -r requirements.txt
+
+            echo "=== [4/5] Restarting services ==="
+            sudo systemctl restart auditflow-backend
+            # Brief pause to give the backend time to bind to port 8000
+            # before the frontend starts and tries to connect
+            sleep 4
+            sudo systemctl restart auditflow-frontend
+
+            echo "=== [5/5] Verifying deployment health ==="
+            sleep 6
+            # Test backend health endpoint
+            curl --fail --silent --max-time 10 http://127.0.0.1:8000/health > /dev/null \
+              && echo "✓ Backend health check: PASSED" \
+              || { echo "✗ Backend health check: FAILED"; exit 1; }
+            # Test frontend is responding
+            curl --fail --silent --max-time 15 http://127.0.0.1:8501 > /dev/null \
+              && echo "✓ Frontend health check: PASSED" \
+              || { echo "✗ Frontend health check: FAILED"; exit 1; }
+
+            echo ""
+            echo "=== Deployment complete ==="
+
+          DEPLOY_SCRIPT
+        # Why heredoc (DEPLOY_SCRIPT): Runs the entire multi-step deploy
+        # script in a single SSH connection, avoiding repeated auth overhead
+
+      # ── Step 4: Post-failure diagnostic hints ────────────────────────────
+      - name: Show debug hints on failure
+        if: failure()
+        run: |
+          echo ""
+          echo "Deployment failed. To debug, SSH into the server and run:"
+          echo ""
+          echo "  Backend logs:   sudo journalctl -u auditflow-backend -n 50"
+          echo "  Frontend logs:  sudo journalctl -u auditflow-frontend -n 50"
+          echo "  Nginx errors:   sudo tail -30 /var/log/nginx/error.log"
+          echo "  Service status: sudo systemctl status auditflow-backend"
