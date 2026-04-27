@@ -34,7 +34,7 @@ A professional-grade, human-in-the-loop security analysis system for GitHub repo
 │              FastAPI Backend (Port 8000)                │
 │  ├─ /analyze (POST)     : Start analysis                │
 │  ├─ /approve (POST)     : Submit approval decision      │
-│  ├─ /status (GET)       : Check analysis status         │
+│  ├─ /status/{thread_id} (GET) : Check analysis status   │
 │  └─ /health (GET)       : Health check                  │
 └────────────────────┬────────────────────────────────────┘
                      │ State Management
@@ -63,7 +63,8 @@ A professional-grade, human-in-the-loop security analysis system for GitHub repo
 
 1. **Clone the repository**
    ```bash
-   cd d:/Nitin/auditflow
+   git clone https://github.com/nk-10/auditflow.git
+   cd auditflow
    ```
 
 2. **Create environment file**
@@ -117,7 +118,7 @@ Then open your browser to: **http://localhost:8501**
 
 ### Step 1: Enter Repository URL
 1. Navigate to http://localhost:8501
-2. Enter a GitHub repository URL (e.g., `https://github.com/torvalds/linux`)
+2. Enter a GitHub repository URL (e.g., `https://github.com/new2code/code-scanning-demo`)
 3. Click **"Analyze"**
 
 ### Step 2: Wait for Analysis
@@ -221,10 +222,14 @@ Health check endpoint.
 
 ```
 auditflow/
+├── .github/
+│   └── workflows/
+│       └── deploy.yml               # GitHub Actions CI/CD pipeline
 ├── backend/
 │   ├── main.py                      # FastAPI application
 │   ├── config.py                    # Configuration management
 │   ├── graph.py                     # LangGraph workflow definition
+│   ├── types.py                     # AnalysisState TypedDict
 │   ├── nodes/
 │   │   ├── scanner_node.py          # GitHub repo scanning
 │   │   ├── security_node.py         # Security analysis
@@ -239,10 +244,13 @@ auditflow/
 ├── docker/
 │   ├── Dockerfile                   # Docker image definition
 │   └── docker-compose.yml           # Docker composition file
+├── docs/
+│   └── DEPLOYMENT.md                # Production deployment guide (AWS EC2)
 ├── requirements.txt                 # Python dependencies
 ├── .env.example                     # Environment template
 ├── run.sh                           # Linux/macOS startup script
 ├── run.bat                          # Windows startup script
+├── LICENSE
 └── README.md                        # This file
 ```
 
@@ -250,7 +258,7 @@ auditflow/
 
 - **API Keys**: Keep your Groq and GitHub tokens secure in `.env` (never commit!)
 - **State Persistence**: SQLite database stores analysis state - ensure proper permissions
-- **Content Analysis**: Repository contents are analyzed locally, not sent to external services
+- **Content Analysis**: File contents are sent to Groq's API for LLM analysis — ensure you are comfortable sharing repository code with Groq before analyzing private repos
 - **GitHub Access**: Only reads repository contents; respects GitHub's rate limiting
 
 ## ⚙️ Configuration
@@ -274,11 +282,40 @@ STREAMLIT_PORT=8501
 BACKEND_URL=http://127.0.0.1:8000
 
 # Database
-DB_PATH=./checkpoints.db
+DB_PATH=./data/checkpoints.db
 
 # Debug Mode
 DEBUG=false
 ```
+
+## 🚀 CI/CD & Deployment
+
+### GitHub Actions (Automatic Deploy on Push)
+
+Pushing to `main` triggers an automatic deployment to an AWS EC2 instance via GitHub Actions (`.github/workflows/deploy.yml`).
+
+**Required GitHub Secrets:**
+
+| Secret | Description |
+|--------|-------------|
+| `EC2_SSH_PRIVATE_KEY` | Private SSH deploy key for EC2 access |
+| `EC2_HOST` | Elastic IP address of the EC2 instance |
+| `EC2_USER` | SSH username (e.g. `auditflow`) |
+
+**What the pipeline does:**
+1. SSH into the EC2 instance
+2. Pull latest code from `main`
+3. Install/update Python dependencies in the virtual environment
+4. Restart `auditflow-backend` and `auditflow-frontend` systemd services
+5. Health-check both services with `curl`
+
+### Full Production Setup
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for step-by-step instructions covering:
+- AWS EC2 Free Tier setup with Elastic IP
+- Nginx reverse proxy configuration
+- systemd service files
+- Security hardening and monitoring
 
 ## 🧪 Testing
 
@@ -334,7 +371,7 @@ DEBUG=false
 - **File Size**: Skips files larger than 1MB
 - **Groq Rate Limit**: ~30 requests/minute on free tier
 - **Analyzed Files**: Key files (code, config, dependencies) are prioritized
-- **Token Limit**: Llama 3.3-70b has 8,000 token context window
+- **Per-request Limits**: App caps each LLM call at 4,000 output tokens and 1,200 chars per file (configurable in `backend/config.py`)
 
 ## 🤝 Contributing
 
