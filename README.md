@@ -2,6 +2,10 @@
 
 A professional-grade, human-in-the-loop security analysis system for GitHub repositories. Uses **LangGraph**, **Groq (Llama 3.3)**, **FastAPI**, and **Streamlit**.
 
+![Python](https://img.shields.io/badge/python-3.11+-blue) ![LangGraph](https://img.shields.io/badge/LangGraph-human--in--the--loop-purple) ![License](https://img.shields.io/badge/license-MIT-green) ![Free AI](https://img.shields.io/badge/AI-Groq%20Free%20Tier-orange)
+
+**🌐 Live Demo: [http://13.232.213.175/](http://13.232.213.175/)** *(HTTP only — do not enter private API keys; free-tier EC2 instance may occasionally be offline)*
+
 ## 🎯 Features
 
 - **Automated Security Analysis**: Analyzes GitHub repositories for:
@@ -18,37 +22,47 @@ A professional-grade, human-in-the-loop security analysis system for GitHub repo
   - Markdown-formatted security reports
   - Severity-based grouping (Critical, High, Medium, Low)
   - Actionable recommendations for each finding
-  - Security score calculation
+  - Security severity summary (Critical / High / Medium / Low breakdown)
 
 - **Free AI**: Uses Groq's free tier with Llama 3.3-70b model (no costs!)
+  - Automatic fallback to Llama 3.1-8b-instant when the primary model hits rate limits — analysis continues uninterrupted
 
 ## 🏗️ Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Streamlit UI                         │
-│  (Repository input, findings review, approval)          │
-└────────────────────┬────────────────────────────────────┘
-                     │ HTTP Requests
-┌────────────────────▼────────────────────────────────────┐
-│              FastAPI Backend (Port 8000)                │
-│  ├─ /analyze (POST)     : Start analysis                │
-│  ├─ /approve (POST)     : Submit approval decision      │
-│  ├─ /status/{thread_id} (GET) : Check analysis status   │
-│  └─ /health (GET)       : Health check                  │
-└────────────────────┬────────────────────────────────────┘
-                     │ State Management
-┌────────────────────▼────────────────────────────────────┐
-│         LangGraph Workflow (State Graph)                │
-│  ├─ scanner_node    : Fetch GitHub repo contents       │
-│  ├─ security_node   : Analyze with Groq LLM            │
-│  ├─ human_review    : Interrupt for approval           │
-│  └─ compiler_node   : Generate final report            │
-└────────────────────┬────────────────────────────────────┘
-                     │
-          ┌──────────┼──────────┐
-          ▼          ▼          ▼
-    [GitHub API] [Groq API] [SQLite]
+```mermaid
+flowchart TD
+    User(["User"]):::ui
+    UI["Streamlit UI<br/>(Port 8501)"]:::ui
+    API["FastAPI Backend<br/>(Port 8000)"]:::api
+    LG["LangGraph Workflow"]:::lg
+
+    Scanner["scanner_node<br/>Fetch GitHub repo"]:::node
+    Security["security_node<br/>Groq LLM analysis"]:::node
+    Review["human_review<br/>Interrupt - awaits approval"]:::node
+    Compiler["compiler_node<br/>Generate report"]:::node
+
+    GH[("GitHub API")]:::ext
+    Groq[("Groq API<br/>Llama 3.3-70b")]:::ext
+    DB[("SQLite<br/>Checkpoints")]:::ext
+
+    User -->|"Enter repo URL"| UI
+    UI -->|"POST /analyze"| API
+    API --> LG
+    LG --> Scanner --> Security --> Review
+    Review -->|"POST /approve"| API
+    API -->|"resume"| Compiler
+    Compiler -->|"Markdown report"| UI
+    UI -->|"Review & download"| User
+
+    Scanner -->|"PyGithub"| GH
+    Security -->|"ChatGroq"| Groq
+    LG -->|"MemorySaver"| DB
+
+    classDef ui fill:#6c3fd4,color:#fff,stroke:#6c3fd4
+    classDef api fill:#1a73e8,color:#fff,stroke:#1a73e8
+    classDef lg fill:#2d7a4f,color:#fff,stroke:#2d7a4f
+    classDef node fill:#444,color:#fff,stroke:#888
+    classDef ext fill:#555,color:#eee,stroke:#999
 ```
 
 ## 🚀 Quick Start
@@ -69,7 +83,8 @@ A professional-grade, human-in-the-loop security analysis system for GitHub repo
 
 2. **Create environment file**
    ```bash
-   cp .env.example .env
+   cp .env.example .env        # Linux/macOS
+   copy .env.example .env      # Windows
    ```
 
 3. **Add your Groq API key to `.env`**
@@ -118,7 +133,7 @@ Then open your browser to: **http://localhost:8501**
 
 ### Step 1: Enter Repository URL
 1. Navigate to http://localhost:8501
-2. Enter a GitHub repository URL (e.g., `https://github.com/new2code/code-scanning-demo`)
+2. Enter a GitHub repository URL (e.g., `https://github.com/psf/requests`)
 3. Click **"Analyze"**
 
 ### Step 2: Wait for Analysis
@@ -137,6 +152,8 @@ Then open your browser to: **http://localhost:8501**
 - Click **"Approve & Generate Report"** to finalize
 - Or click **"Reject Analysis"** to discard
 
+![Findings Review](docs/screenshots/findings-review-screen.png)
+
 ### Step 4: Download Report
 - Once approved, download the professional Markdown report
 - Report includes:
@@ -145,7 +162,13 @@ Then open your browser to: **http://localhost:8501**
   - Detailed findings
   - Actionable recommendations
 
+![Report Download](docs/screenshots/report-download-screen.png)
+
 ## 🔧 API Reference
+
+> Interactive API docs auto-generated at **`http://localhost:8000/docs`** (Swagger UI).
+
+![Swagger UI](docs/screenshots/swagger-docs.png)
 
 ### POST /analyze
 Start a new security analysis for a GitHub repository.
@@ -161,10 +184,12 @@ Start a new security analysis for a GitHub repository.
 ```json
 {
   "thread_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "awaiting_approval",
-  "message": "Repository scanned and analyzed. Awaiting human approval."
+  "status": "scanning",
+  "message": "Analysis started."
 }
 ```
+
+> Poll `GET /status/{thread_id}` to track progress. Status transitions: `scanning` → `analyzing` → `awaiting_approval` → `completed`.
 
 ### GET /status/{thread_id}
 Check the status of an ongoing or completed analysis.
@@ -245,7 +270,8 @@ auditflow/
 │   ├── Dockerfile                   # Docker image definition
 │   └── docker-compose.yml           # Docker composition file
 ├── docs/
-│   └── DEPLOYMENT.md                # Production deployment guide (AWS EC2)
+│   ├── DEPLOYMENT.md                # Production deployment guide (AWS EC2)
+│   └── screenshots/                 # README screenshots
 ├── requirements.txt                 # Python dependencies
 ├── .env.example                     # Environment template
 ├── run.sh                           # Linux/macOS startup script
@@ -288,7 +314,7 @@ DB_PATH=./data/checkpoints.db
 DEBUG=false
 ```
 
-## 🚀 CI/CD & Deployment
+## 🛠️ CI/CD & Deployment
 
 ### GitHub Actions (Automatic Deploy on Push)
 
@@ -310,6 +336,8 @@ Pushing to `main` triggers an automatic deployment to an AWS EC2 instance via Gi
 5. Health-check both services with `curl`
 
 ### Full Production Setup
+
+![CI/CD Pipeline](docs/screenshots/github-actions-green.png)
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for step-by-step instructions covering:
 - AWS EC2 Free Tier setup with Elastic IP
@@ -334,9 +362,9 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for step-by-step instructions cover
 
 ### Example Test Repositories
 
-- Small: https://github.com/pallets/hello-world
+- Small: https://github.com/pallets/flask
 - Medium: https://github.com/psf/requests
-- Large: https://github.com/rust-lang/rust (may timeout)
+- Large: https://github.com/psf/black
 
 ## 📊 Supported Analysis
 
@@ -365,11 +393,11 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for step-by-step instructions cover
 - Missing authentication/authorization
 - Insecure default settings
 
-## 🚀 Performance Considerations
+## ⚡ Performance Considerations
 
 - **File Limit**: Analyzes up to 100 files per repository (configurable)
 - **File Size**: Skips files larger than 1MB
-- **Groq Rate Limit**: ~30 requests/minute on free tier
+- **Groq Rate Limit**: ~30 requests/minute on free tier; automatic fallback to `llama-3.1-8b-instant` on tokens-per-day exhaustion
 - **Analyzed Files**: Key files (code, config, dependencies) are prioritized
 - **Per-request Limits**: App caps each LLM call at 4,000 output tokens and 1,200 chars per file (configurable in `backend/config.py`)
 
@@ -386,7 +414,7 @@ Improvements welcome! Areas for enhancement:
 
 ## 📝 License
 
-This project is open source and available for educational and professional security testing use.
+MIT License. See [LICENSE](LICENSE) for details.
 
 ## 🆘 Troubleshooting
 
@@ -412,15 +440,15 @@ curl -H "Authorization: Bearer YOUR_KEY" https://api.groq.com/openai/v1/models
 
 ### Analysis timeout
 - Reduce `max_files_to_analyze` in `backend/config.py`
-- Increase `llm_max_tokens` for longer analysis
+- Reduce `llm_max_tokens` in `backend/config.py` to speed up each LLM call
 
 ## 📞 Support
 
 For issues and questions:
 1. Check the troubleshooting section above
 2. Review FastAPI logs: Check terminal output
-3. Check Streamlit logs: Check browser console (F12)
-4. Review database: `sqlite3 checkpoints.db`
+3. Check Streamlit logs: Check terminal running `streamlit run`
+4. Review database: `sqlite3 data/checkpoints.db`
 
 ## 🎓 Learning Resources
 
