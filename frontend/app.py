@@ -72,13 +72,15 @@ if "current_step" not in st.session_state:
     st.session_state.current_step = "input"
 if "analysis_data" not in st.session_state:
     st.session_state.analysis_data = {}
+if "approval_submitted" not in st.session_state:
+    st.session_state.approval_submitted = False
 
 
 def get_status(thread_id: str) -> dict:
     """Check analysis status."""
     logger.info("Checking status for thread_id=%s", thread_id)
     try:
-        response = requests.get(f"{BACKEND_URL}/status/{thread_id}")
+        response = requests.get(f"{BACKEND_URL}/status/{thread_id}", timeout=30)
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -94,6 +96,7 @@ def submit_approval(thread_id: str, approved: bool) -> dict:
         response = requests.post(
             f"{BACKEND_URL}/approve",
             json={"thread_id": thread_id, "approved": approved},
+            timeout=30,
         )
         response.raise_for_status()
         return response.json()
@@ -110,6 +113,7 @@ def start_analysis(repo_url: str) -> dict:
         response = requests.post(
             f"{BACKEND_URL}/analyze",
             json={"repo_url": repo_url},
+            timeout=30,
         )
         response.raise_for_status()
         return response.json()
@@ -188,6 +192,7 @@ with st.sidebar:
             st.session_state.thread_id = None
             st.session_state.current_step = "input"
             st.session_state.analysis_data = {}
+            st.session_state.approval_submitted = False
             st.rerun()
 
 # Main content area
@@ -223,6 +228,7 @@ elif st.session_state.current_step == "progress":
     st.header("Analysis Progress")
 
     # Poll for status
+    status_placeholder = st.empty()
     with st.spinner("Checking analysis status..."):
         for i in range(300):  # Poll for up to 5 minutes
             status_data = get_status(st.session_state.thread_id)
@@ -230,24 +236,25 @@ elif st.session_state.current_step == "progress":
             if status_data:
                 current_status = status_data.get("status", "unknown")
 
-                # Display progress
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Status", current_status.replace("_", " ").title())
+                # Overwrite previous poll render in place
+                with status_placeholder.container():
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Status", current_status.replace("_", " ").title())
 
-                with col2:
-                    if "findings_count" in status_data and status_data["findings_count"]:
-                        st.metric("Total Findings", status_data["findings_count"].get("total", 0))
+                    with col2:
+                        if "findings_count" in status_data and status_data["findings_count"]:
+                            st.metric("Total Findings", status_data["findings_count"].get("total", 0))
 
-                with col3:
-                    if "findings_count" in status_data and status_data["findings_count"]:
-                        st.metric("Critical", status_data["findings_count"].get("critical", 0))
+                    with col3:
+                        if "findings_count" in status_data and status_data["findings_count"]:
+                            st.metric("Critical", status_data["findings_count"].get("critical", 0))
 
-                with col4:
-                    if "findings_count" in status_data and status_data["findings_count"]:
-                        st.metric("High Priority", status_data["findings_count"].get("high", 0))
+                    with col4:
+                        if "findings_count" in status_data and status_data["findings_count"]:
+                            st.metric("High Priority", status_data["findings_count"].get("high", 0))
 
-                st.info(status_data.get("message", "Processing..."))
+                    st.info(status_data.get("message", "Processing..."))
 
                 # If awaiting approval, show findings and approval buttons
                 if current_status == "awaiting_approval":
@@ -258,23 +265,31 @@ elif st.session_state.current_step == "progress":
 
                     col1, col2 = st.columns(2)
 
-                    with col1:
-                        if st.button("✅ Approve & Generate Report", use_container_width=True):
-                            with st.spinner("Generating report..."):
-                                approval_result = submit_approval(st.session_state.thread_id, True)
-                                if approval_result and approval_result.get("status") == "completed":
-                                    st.session_state.current_step = "report"
-                                    st.session_state.analysis_data = approval_result
-                                    st.rerun()
+                    if not st.session_state.approval_submitted:
+                        with col1:
+                            if st.button("✅ Approve & Generate Report", use_container_width=True):
+                                st.session_state.approval_submitted = True
+                                with st.spinner("Generating report..."):
+                                    approval_result = submit_approval(st.session_state.thread_id, True)
+                                    if approval_result and approval_result.get("status") == "completed":
+                                        st.session_state.current_step = "report"
+                                        st.session_state.analysis_data = approval_result
+                                        st.rerun()
+                                    else:
+                                        st.session_state.approval_submitted = False
+                                        st.error(approval_result.get("report", "Failed to generate report") if approval_result else "Request failed")
 
-                    with col2:
-                        if st.button("❌ Reject Analysis", use_container_width=True):
-                            with st.spinner("Rejecting analysis..."):
-                                approval_result = submit_approval(st.session_state.thread_id, False)
-                                st.session_state.current_step = "input"
-                                st.session_state.thread_id = None
-                                st.info("Analysis rejected. Starting fresh analysis.")
-                                st.rerun()
+                        with col2:
+                            if st.button("❌ Reject Analysis", use_container_width=True):
+                                st.session_state.approval_submitted = True
+                                with st.spinner("Rejecting analysis..."):
+                                    submit_approval(st.session_state.thread_id, False)
+                                    st.session_state.thread_id = None
+                                    st.session_state.current_step = "input"
+                                    st.session_state.approval_submitted = False
+                                    st.rerun()
+                    else:
+                        st.info("Processing approval...")
 
                     break
 
@@ -287,6 +302,13 @@ elif st.session_state.current_step == "progress":
                 # If error, show error
                 elif current_status == "error":
                     st.error(f"Analysis failed: {status_data.get('message', 'Unknown error')}")
+                    break
+
+                elif current_status in ("scanning", "analyzing"):
+                    pass  # expected in-progress states, keep polling
+
+                else:
+                    st.warning(f"Unexpected status '{current_status}'. Please refresh the page.")
                     break
 
             # Poll every 2 seconds
@@ -336,6 +358,7 @@ elif st.session_state.current_step == "report":
                 st.session_state.thread_id = None
                 st.session_state.current_step = "input"
                 st.session_state.analysis_data = {}
+                st.session_state.approval_submitted = False
                 st.rerun()
 
         with col2:

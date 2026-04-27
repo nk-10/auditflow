@@ -137,30 +137,30 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
             "error": None,
         }
 
-        # Start the workflow in a thread so it does not block the event loop.
-        # workflow.invoke() is synchronous and can run for minutes (GitHub fetch + LLM).
-        try:
-            await asyncio.to_thread(
-                workflow.invoke,
-                initial_state,
-                {"configurable": {"thread_id": thread_id}},
-            )
-        except GraphInterrupt:
-            # Expected: workflow paused at human_review interrupt
-            pass
-        except Exception as e:
-            logger.error("Workflow raised an unexpected error: %s", e, exc_info=True)
-            return AnalyzeResponse(
-                thread_id=thread_id,
-                status="error",
-                message=f"Analysis failed: {str(e)}",
-            )
+        async def run_workflow():
+            try:
+                await asyncio.to_thread(
+                    workflow.invoke,
+                    initial_state,
+                    {"configurable": {"thread_id": thread_id}},
+                )
+            except GraphInterrupt:
+                # Expected: workflow paused at human_review interrupt
+                pass
+            except Exception as e:
+                logger.error(
+                    "Background workflow error for thread_id=%s: %s",
+                    thread_id,
+                    e,
+                    exc_info=True,
+                )
 
-        # If we got here without error, the interrupt paused us
+        asyncio.create_task(run_workflow())
+
         return AnalyzeResponse(
             thread_id=thread_id,
-            status="awaiting_approval",
-            message="Repository scanned and analyzed. Awaiting human approval.",
+            status="scanning",
+            message="Analysis started.",
         )
 
     except HTTPException:
@@ -293,6 +293,14 @@ async def submit_approval(request: ApprovalRequest) -> ApprovalResponse:
                 {"configurable": {"thread_id": request.thread_id}}
             )
             final_state = final_state_snapshot.values if final_state_snapshot else state
+
+            if final_state.get("error"):
+                return ApprovalResponse(
+                    thread_id=request.thread_id,
+                    status="error",
+                    report=f"Report generation failed: {final_state.get('error')}",
+                    findings=final_state.get("security_findings", []),
+                )
 
             return ApprovalResponse(
                 thread_id=request.thread_id,

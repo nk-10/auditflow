@@ -2,7 +2,6 @@
 
 import json
 import logging
-import re
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage
 from groq import APIStatusError as GroqAPIStatusError
@@ -185,13 +184,12 @@ Return ONLY valid JSON, no other text."""
             List of parsed security findings
         """
         try:
-            # Extract JSON from response (in case there's extra text)
-            json_match = re.search(r"\{[\s\S]*\}", response_text)
-            if not json_match:
+            # Find the first { and decode from there; raw_decode ignores trailing text
+            start = response_text.find("{")
+            if start == -1:
                 return self._create_default_finding("Failed to parse analysis", response_text)
 
-            json_str = json_match.group(0)
-            data = json.loads(json_str)
+            data, _ = json.JSONDecoder().raw_decode(response_text, start)
 
             findings = data.get("findings", [])
 

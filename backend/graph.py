@@ -27,10 +27,16 @@ def create_graph():
     graph.add_node("human_review", human_review_node)
     graph.add_node("compiler", compiler_node)
 
+    def route_after_scanner(state: AnalysisState) -> str:
+        return END if state.get("error") else "security"
+
+    def route_after_security(state: AnalysisState) -> str:
+        return END if state.get("error") else "human_review"
+
     # Define edges
     graph.add_edge(START, "scanner")
-    graph.add_edge("scanner", "security")
-    graph.add_edge("security", "human_review")
+    graph.add_conditional_edges("scanner", route_after_scanner)
+    graph.add_conditional_edges("security", route_after_security)
 
     # Conditional edge: if approved, go to compiler; otherwise end
     def should_compile(state: AnalysisState) -> str:
