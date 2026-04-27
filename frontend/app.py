@@ -1,11 +1,13 @@
 """Streamlit frontend for the Autonomous Codebase Librarian."""
 
+import html
 import logging
-import streamlit as st
-import requests
+import os
 import time
 from datetime import datetime
-import os
+
+import requests
+import streamlit as st
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +16,7 @@ st.set_page_config(
     page_title="Autonomous Codebase Librarian",
     page_icon="🔍",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # Custom CSS
@@ -74,24 +76,64 @@ if "analysis_data" not in st.session_state:
     st.session_state.analysis_data = {}
 if "approval_submitted" not in st.session_state:
     st.session_state.approval_submitted = False
+if "poll_count" not in st.session_state:
+    st.session_state.poll_count = 0
+if "poll_interval" not in st.session_state:
+    st.session_state.poll_interval = 2
+if "last_poll_status" not in st.session_state:
+    st.session_state.last_poll_status = None
+if "analysis_start_time" not in st.session_state:
+    st.session_state.analysis_start_time = None
+
+
+def _api_error_message(exc: Exception, response: "requests.Response | None" = None) -> str:
+    """Return a user-friendly error string for a failed API call."""
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return "Cannot connect to the analysis service. Please ensure the backend is running."
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "The request timed out. The service may be busy — please try again."
+    if isinstance(exc, requests.exceptions.HTTPError) and response is not None:
+        status = response.status_code
+        try:
+            body = response.json()
+            if status == 422:
+                errors = body.get("detail", [])
+                if isinstance(errors, list) and errors:
+                    ctx_reason = (errors[0].get("ctx") or {}).get("reason", "")
+                    msg = errors[0].get("msg", "")
+                    return ctx_reason or msg or "Please enter a valid GitHub repository URL (e.g. https://github.com/owner/repo)."
+                return "Please enter a valid GitHub repository URL (e.g. https://github.com/owner/repo)."
+            detail = body.get("detail", "")
+            if detail:
+                return str(detail)
+        except Exception:
+            pass
+        if status == 404:
+            return "The requested analysis was not found. Please start a new analysis."
+        if status >= 500:
+            return "The analysis service encountered an internal error. Please try again."
+        return f"Unexpected server response ({status}). Please try again."
+    return "An unexpected error occurred. Please try again."
 
 
 def get_status(thread_id: str) -> dict:
     """Check analysis status."""
     logger.info("Checking status for thread_id=%s", thread_id)
+    response = None
     try:
         response = requests.get(f"{BACKEND_URL}/status/{thread_id}", timeout=30)
         response.raise_for_status()
         return response.json()
     except Exception as e:
         logger.error("Error checking status for thread_id=%s: %s", thread_id, e, exc_info=True)
-        st.error(f"Error checking status: {e}")
+        st.error(_api_error_message(e, response))
         return None
 
 
 def submit_approval(thread_id: str, approved: bool) -> dict:
     """Submit approval decision."""
     logger.info("Submitting approval for thread_id=%s approved=%s", thread_id, approved)
+    response = None
     try:
         response = requests.post(
             f"{BACKEND_URL}/approve",
@@ -102,13 +144,14 @@ def submit_approval(thread_id: str, approved: bool) -> dict:
         return response.json()
     except Exception as e:
         logger.error("Error submitting approval for thread_id=%s: %s", thread_id, e, exc_info=True)
-        st.error(f"Error submitting approval: {e}")
+        st.error(_api_error_message(e, response))
         return None
 
 
 def start_analysis(repo_url: str) -> dict:
     """Start a new analysis."""
     logger.info("Starting analysis for repo_url=%s", repo_url)
+    response = None
     try:
         response = requests.post(
             f"{BACKEND_URL}/analyze",
@@ -119,7 +162,7 @@ def start_analysis(repo_url: str) -> dict:
         return response.json()
     except Exception as e:
         logger.error("Error starting analysis for repo_url=%s: %s", repo_url, e, exc_info=True)
-        st.error(f"Error starting analysis: {e}")
+        st.error(_api_error_message(e, response))
         return None
 
 
@@ -136,9 +179,17 @@ def display_findings(findings: list):
         severity = finding.get("severity", "info").lower()
         if severity in severity_levels:
             severity_levels[severity].append(finding)
+        else:
+            severity_levels["info"].append(finding)
 
     # Display by severity
-    severity_order = [("critical", "🔴 Critical"), ("high", "🟠 High"), ("medium", "🟡 Medium"), ("low", "🟢 Low"), ("info", "ℹ️ Info")]
+    severity_order = [
+        ("critical", "🔴 Critical"),
+        ("high", "🟠 High"),
+        ("medium", "🟡 Medium"),
+        ("low", "🟢 Low"),
+        ("info", "ℹ️ Info"),
+    ]
 
     for severity_key, severity_label in severity_order:
         findings_at_level = severity_levels[severity_key]
@@ -147,6 +198,13 @@ def display_findings(findings: list):
 
             for idx, finding in enumerate(findings_at_level, 1):
                 with st.expander(f"{idx}. {finding.get('title', 'Unknown Issue')}"):
+                    safe_sev = html.escape(finding.get("severity", severity_key).upper())
+                    st.markdown(
+                        f'<div class="finding-{severity_key}"'
+                        f' style="padding:6px 10px;margin-bottom:8px;">'
+                        f'<strong>{safe_sev}</strong></div>',
+                        unsafe_allow_html=True,
+                    )
                     col1, col2 = st.columns(2)
                     with col1:
                         st.write(f"**File:** `{finding.get('file', 'N/A')}`")
@@ -157,16 +215,19 @@ def display_findings(findings: list):
                         st.write(f"**Type:** {finding.get('type', 'vulnerability')}")
                         st.write(f"**Severity:** {finding.get('severity', 'unknown')}")
 
-                    st.write(f"**Description:**")
+                    st.write("**Description:**")
                     st.write(finding.get("description", "No description provided"))
 
-                    st.write(f"**Recommendation:**")
+                    st.write("**Recommendation:**")
                     st.write(finding.get("recommendation", "Please review manually"))
 
 
 # Main UI
 st.markdown(
-    '<div class="main-header"><h1>🔍 Autonomous Codebase Librarian</h1><p>Automated security analysis for GitHub repositories</p></div>',
+    '<div class="main-header">'
+    '<h1>🔍 Autonomous Codebase Librarian</h1>'
+    '<p>Automated security analysis for GitHub repositories</p>'
+    '</div>',
     unsafe_allow_html=True,
 )
 
@@ -187,12 +248,12 @@ with st.sidebar:
     st.divider()
 
     if st.session_state.thread_id:
-        st.write(f"**Current Analysis ID:**\n`{st.session_state.thread_id}`")
         if st.button("🔄 Start New Analysis"):
             st.session_state.thread_id = None
             st.session_state.current_step = "input"
             st.session_state.analysis_data = {}
             st.session_state.approval_submitted = False
+            st.session_state.analysis_start_time = None
             st.rerun()
 
 # Main content area
@@ -216,6 +277,10 @@ if st.session_state.current_step == "input":
 
             if result and "thread_id" in result:
                 st.session_state.thread_id = result["thread_id"]
+                st.session_state.poll_count = 0
+                st.session_state.poll_interval = 2
+                st.session_state.last_poll_status = None
+                st.session_state.analysis_start_time = time.time()
                 st.session_state.current_step = "progress"
                 st.rerun()
             elif result:
@@ -227,92 +292,105 @@ if st.session_state.current_step == "input":
 elif st.session_state.current_step == "progress":
     st.header("Analysis Progress")
 
-    # Poll for status
-    status_placeholder = st.empty()
-    with st.spinner("Checking analysis status..."):
-        for i in range(300):  # Poll for up to 5 minutes
-            status_data = get_status(st.session_state.thread_id)
+    status_data = get_status(st.session_state.thread_id)
 
-            if status_data:
-                current_status = status_data.get("status", "unknown")
+    if status_data is None:
+        st.error("Unable to reach the analysis service. Please refresh the page.")
+    else:
+        current_status = status_data.get("status", "unknown")
 
-                # Overwrite previous poll render in place
-                with status_placeholder.container():
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("Status", current_status.replace("_", " ").title())
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Status", current_status.replace("_", " ").title())
+        with col2:
+            if status_data.get("findings_count"):
+                st.metric("Total Findings", status_data["findings_count"].get("total", 0))
+        with col3:
+            if status_data.get("findings_count"):
+                st.metric("Critical", status_data["findings_count"].get("critical", 0))
+        with col4:
+            if status_data.get("findings_count"):
+                st.metric("High Priority", status_data["findings_count"].get("high", 0))
 
-                    with col2:
-                        if "findings_count" in status_data and status_data["findings_count"]:
-                            st.metric("Total Findings", status_data["findings_count"].get("total", 0))
+        st.info(status_data.get("message", "Processing..."))
 
-                    with col3:
-                        if "findings_count" in status_data and status_data["findings_count"]:
-                            st.metric("Critical", status_data["findings_count"].get("critical", 0))
+        if current_status == "awaiting_approval":
+            st.subheader("Security Findings Review")
 
-                    with col4:
-                        if "findings_count" in status_data and status_data["findings_count"]:
-                            st.metric("High Priority", status_data["findings_count"].get("high", 0))
+            if status_data.get("findings"):
+                display_findings(status_data["findings"])
 
-                    st.info(status_data.get("message", "Processing..."))
+            if not st.session_state.approval_submitted:
+                approve_col, reject_col = st.columns(2)
+                with approve_col:
+                    if st.button("✅ Approve & Generate Report", use_container_width=True):
+                        st.session_state.approval_submitted = True
+                        with st.spinner("Generating report..."):
+                            approval_result = submit_approval(st.session_state.thread_id, True)
+                            if approval_result and approval_result.get("status") == "completed":
+                                st.session_state.current_step = "report"
+                                st.session_state.analysis_data = approval_result
+                                st.rerun()
+                            else:
+                                st.session_state.approval_submitted = False
+                                if approval_result and approval_result.get("status") == "error":
+                                    st.error(f"Report generation failed: {approval_result.get('report', 'Unknown error')}")
+                                else:
+                                    st.error("Failed to generate the report. Please try again.")
+                with reject_col:
+                    if st.button("❌ Reject Analysis", use_container_width=True):
+                        reject_result = submit_approval(st.session_state.thread_id, False)
+                        if reject_result is None:
+                            st.error("Failed to send rejection. Please try again.")
+                            st.stop()
+                        st.session_state.thread_id = None
+                        st.session_state.current_step = "input"
+                        st.session_state.approval_submitted = False
+                        st.rerun()
+            else:
+                st.info("Processing approval...")
 
-                # If awaiting approval, show findings and approval buttons
-                if current_status == "awaiting_approval":
-                    st.subheader("Security Findings Review")
+        elif current_status == "completed":
+            st.session_state.current_step = "report"
+            st.session_state.analysis_data = status_data
+            st.rerun()
 
-                    if "findings" in status_data and status_data["findings"]:
-                        display_findings(status_data["findings"])
+        elif current_status == "error":
+            st.error(f"Analysis failed: {status_data.get('message', 'Unknown error')}")
 
-                    col1, col2 = st.columns(2)
+        else:
+            # Still in progress (scanning, analyzing) — show step progress and poll again
+            step_map = {
+                "scanning": (1, "Scanning repository structure"),
+                "analyzing": (2, "Analyzing for vulnerabilities"),
+            }
+            step_num, step_label = step_map.get(current_status, (1, "Processing"))
+            st.progress(step_num / 3, text=f"Step {step_num} of 3: {step_label}")
 
-                    if not st.session_state.approval_submitted:
-                        with col1:
-                            if st.button("✅ Approve & Generate Report", use_container_width=True):
-                                st.session_state.approval_submitted = True
-                                with st.spinner("Generating report..."):
-                                    approval_result = submit_approval(st.session_state.thread_id, True)
-                                    if approval_result and approval_result.get("status") == "completed":
-                                        st.session_state.current_step = "report"
-                                        st.session_state.analysis_data = approval_result
-                                        st.rerun()
-                                    else:
-                                        st.session_state.approval_submitted = False
-                                        st.error(approval_result.get("report", "Failed to generate report") if approval_result else "Request failed")
+            elapsed = (
+                int(time.time() - st.session_state.analysis_start_time)
+                if st.session_state.analysis_start_time
+                else 0
+            )
+            if elapsed >= 10:
+                mins, secs = divmod(elapsed, 60)
+                elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+                st.caption(f"Elapsed: {elapsed_str} — Analysis typically takes 1–5 minutes.")
+            else:
+                st.caption("Analysis typically takes 1–5 minutes.")
 
-                        with col2:
-                            if st.button("❌ Reject Analysis", use_container_width=True):
-                                st.session_state.approval_submitted = True
-                                with st.spinner("Rejecting analysis..."):
-                                    submit_approval(st.session_state.thread_id, False)
-                                    st.session_state.thread_id = None
-                                    st.session_state.current_step = "input"
-                                    st.session_state.approval_submitted = False
-                                    st.rerun()
-                    else:
-                        st.info("Processing approval...")
+            if current_status == st.session_state.last_poll_status:
+                st.session_state.poll_interval = min(st.session_state.poll_interval * 1.5, 10)
+            else:
+                st.session_state.poll_interval = 2
+            st.session_state.last_poll_status = current_status
 
-                    break
-
-                # If completed, show report
-                elif current_status == "completed":
-                    st.session_state.current_step = "report"
-                    st.session_state.analysis_data = status_data
-                    st.rerun()
-
-                # If error, show error
-                elif current_status == "error":
-                    st.error(f"Analysis failed: {status_data.get('message', 'Unknown error')}")
-                    break
-
-                elif current_status in ("scanning", "analyzing"):
-                    pass  # expected in-progress states, keep polling
-
-                else:
-                    st.warning(f"Unexpected status '{current_status}'. Please refresh the page.")
-                    break
-
-            # Poll every 2 seconds
-            time.sleep(2)
+            st.session_state.poll_count += 1
+            if st.session_state.poll_count >= 300:
+                st.error("Analysis timed out after 10 minutes. Please start a new analysis.")
+            else:
+                time.sleep(st.session_state.poll_interval)
+                st.rerun()
 
 elif st.session_state.current_step == "report":
     if st.session_state.analysis_data:
@@ -359,6 +437,7 @@ elif st.session_state.current_step == "report":
                 st.session_state.current_step = "input"
                 st.session_state.analysis_data = {}
                 st.session_state.approval_submitted = False
+                st.session_state.analysis_start_time = None
                 st.rerun()
 
         with col2:
@@ -366,4 +445,4 @@ elif st.session_state.current_step == "report":
 
 # Footer
 st.divider()
-st.caption(f"🚀 Autonomous Codebase Librarian v1.0 | Backend: {BACKEND_URL}")
+st.caption("🚀 Autonomous Codebase Librarian v1.0")
