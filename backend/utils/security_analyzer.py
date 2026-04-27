@@ -2,9 +2,11 @@
 
 import json
 import logging
+import re
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage
 from groq import APIStatusError as GroqAPIStatusError
+from groq import RateLimitError as GroqRateLimitError
 from tenacity import (
     retry,
     retry_if_exception,
@@ -17,11 +19,31 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
+_TPD_WAIT_RE = re.compile(
+    r"(?:try again in|retry (?:after|in))\s+"
+    r"(\d+h\d+m[\d.]+s|\d+h\d+m|\d+h[\d.]+s|\d+h|\d+m[\d.]+s|\d+m|\d+[\d.]*s)",
+    re.IGNORECASE,
+)
+
+
+def _is_tpd_error(exc: BaseException) -> bool:
+    if not isinstance(exc, GroqRateLimitError):
+        return False
+    msg = str(exc).lower()
+    return "tokens per day" in msg or " tpd" in msg
+
+
+def _extract_wait_time(exc: BaseException) -> str | None:
+    m = _TPD_WAIT_RE.search(str(exc))
+    return m.group(1) if m else None
+
 
 def _is_retryable_llm_error(exc: BaseException) -> bool:
     """Return False for errors where retrying the same payload will never succeed."""
     if isinstance(exc, GroqAPIStatusError) and exc.status_code == 413:
         return False  # payload too large — retrying won't shrink the prompt
+    if _is_tpd_error(exc):
+        return False  # daily token quota — won't recover within seconds
     return True
 
 
@@ -29,9 +51,16 @@ class SecurityAnalyzer:
     """Analyzes repository files for security vulnerabilities using Groq."""
 
     def __init__(self):
-        """Initialize the security analyzer with Groq LLM."""
+        """Initialize the security analyzer with primary and fallback Groq LLMs."""
         self.llm = ChatGroq(
             model=settings.llm_model,
+            temperature=settings.llm_temperature,
+            max_tokens=settings.llm_max_tokens,
+            groq_api_key=settings.groq_api_key,
+            request_timeout=60,
+        )
+        self.llm_fallback = ChatGroq(
+            model=settings.llm_model_fallback,
             temperature=settings.llm_temperature,
             max_tokens=settings.llm_max_tokens,
             groq_api_key=settings.groq_api_key,
@@ -52,26 +81,48 @@ class SecurityAnalyzer:
             return []
 
         logger.info("SecurityAnalyzer analyzing %d files", len(files))
-        # Prepare file summary for analysis
         file_summary = self._prepare_file_summary(files)
-
-        # Create comprehensive security analysis prompt
         prompt = self._create_analysis_prompt(file_summary)
         logger.debug("SecurityAnalyzer generated analysis prompt of length %d", len(prompt))
 
-        # Get LLM analysis — wrapped with retry for transient failures
+        messages = [HumanMessage(content=prompt)]
+
+        # Primary model
         try:
-            response = self._invoke_llm_with_retry([HumanMessage(content=prompt)])
+            response = self._invoke_llm_with_retry(messages)
         except RetryError as exc:
             raise RuntimeError(
-                "LLM analysis failed after 3 attempts — Groq may be unavailable or rate-limited"
+                f"LLM analysis failed after 3 attempts on primary model "
+                f"({settings.llm_model}) — Groq may be unavailable or rate-limited"
             ) from exc
-        logger.info("SecurityAnalyzer received LLM response")
+        except GroqRateLimitError as exc:
+            # TPD on primary: predicate returned False, tenacity raised immediately
+            wait = _extract_wait_time(exc)
+            wait_msg = f" Try again in {wait}." if wait else ""
+            logger.warning(
+                "Primary model %s hit daily token limit (TPD).%s Switching to %s.",
+                settings.llm_model, wait_msg, settings.llm_model_fallback,
+            )
+            # Fallback model
+            try:
+                response = self._invoke_llm_fallback_with_retry(messages)
+                logger.info("Fallback model %s succeeded.", settings.llm_model_fallback)
+            except RetryError as exc2:
+                raise RuntimeError(
+                    f"LLM analysis failed after 3 attempts on fallback model "
+                    f"({settings.llm_model_fallback}) — Groq may be rate-limited"
+                ) from exc2
+            except GroqRateLimitError as exc2:
+                wait2 = _extract_wait_time(exc2)
+                wait_msg2 = f" Try again in {wait2}." if wait2 else ""
+                raise RuntimeError(
+                    f"Both models have reached their daily token limit (TPD). "
+                    f"Primary: {settings.llm_model}, Fallback: {settings.llm_model_fallback}.{wait_msg2}"
+                ) from exc2
 
-        # Parse findings from response
+        logger.info("SecurityAnalyzer received LLM response")
         findings = self._parse_findings(response.content)
         logger.info("SecurityAnalyzer parsed %d findings", len(findings))
-
         return findings
 
     @retry(
@@ -84,10 +135,19 @@ class SecurityAnalyzer:
         """Invoke the LLM with automatic retry on transient failures.
 
         Retries up to 3 times with exponential backoff (2s → 30s max).
-        Skips retry for HTTP 413 (payload too large) since the prompt
-        won't change between attempts.
+        Skips retry for HTTP 413 (payload too large) and TPD rate limits.
         """
         return self.llm.invoke(messages)
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception(_is_retryable_llm_error),
+        reraise=False,
+    )
+    def _invoke_llm_fallback_with_retry(self, messages: list) -> object:
+        """Invoke the fallback LLM with the same retry policy as the primary."""
+        return self.llm_fallback.invoke(messages)
 
     def _prepare_file_summary(self, files: list[dict]) -> str:
         """Prepare a summary of files for analysis.

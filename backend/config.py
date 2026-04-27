@@ -28,6 +28,7 @@ class Settings(BaseSettings):
 
     # LLM Configuration
     llm_model: str = "llama-3.3-70b-versatile"
+    llm_model_fallback: str = "llama-3.1-8b-instant"
     llm_temperature: float = 0.3
     llm_max_tokens: int = 4000
     # Groq free tier: 12k TPM. Budget: ~7k input tokens ≈ 28k chars of file content.

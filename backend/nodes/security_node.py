@@ -50,7 +50,8 @@ def security_node(state: AnalysisState) -> AnalysisState:
         return state
 
     except Exception as e:
-        state["error"] = f"Security analysis error: {str(e)}"
+        error_msg = str(e)
+        state["error"] = f"Security analysis error: {error_msg}"
         state["security_findings"] = []
-        logger.error("Security node failed: %s", e, exc_info=True)
+        logger.error("Security node failed (%s): %s", type(e).__name__, error_msg, exc_info=True)
         return state
