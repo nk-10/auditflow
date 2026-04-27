@@ -38,12 +38,21 @@ def _extract_wait_time(exc: BaseException) -> str | None:
     return m.group(1) if m else None
 
 
+def _is_tpm_error(exc: BaseException) -> bool:
+    if not isinstance(exc, GroqRateLimitError):
+        return False
+    msg = str(exc).lower()
+    return "tokens per minute" in msg or " tpm" in msg
+
+
 def _is_retryable_llm_error(exc: BaseException) -> bool:
     """Return False for errors where retrying the same payload will never succeed."""
     if isinstance(exc, GroqAPIStatusError) and exc.status_code == 413:
         return False  # payload too large — retrying won't shrink the prompt
     if _is_tpd_error(exc):
         return False  # daily token quota — won't recover within seconds
+    if _is_tpm_error(exc):
+        return False  # per-minute token quota — retrying immediately won't help
     return True
 
 
@@ -62,7 +71,7 @@ class SecurityAnalyzer:
         self.llm_fallback = ChatGroq(
             model=settings.llm_model_fallback,
             temperature=settings.llm_temperature,
-            max_tokens=settings.llm_max_tokens,
+            max_tokens=settings.llm_fallback_max_tokens,
             groq_api_key=settings.groq_api_key,
             request_timeout=60,
         )
@@ -103,9 +112,21 @@ class SecurityAnalyzer:
                 "Primary model %s hit daily token limit (TPD).%s Switching to %s.",
                 settings.llm_model, wait_msg, settings.llm_model_fallback,
             )
-            # Fallback model
+            # Fallback model — use a compact prompt to fit within the smaller TPM budget
+            compact_summary = self._prepare_file_summary(
+                files,
+                max_files=settings.llm_fallback_max_files,
+                max_chars=settings.llm_fallback_max_chars_per_file,
+            )
+            fallback_messages = [HumanMessage(content=self._create_analysis_prompt(compact_summary))]
+            logger.debug(
+                "SecurityAnalyzer fallback prompt length %d (compact: %d files × %d chars)",
+                len(fallback_messages[0].content),
+                settings.llm_fallback_max_files,
+                settings.llm_fallback_max_chars_per_file,
+            )
             try:
-                response = self._invoke_llm_fallback_with_retry(messages)
+                response = self._invoke_llm_fallback_with_retry(fallback_messages)
                 logger.info("Fallback model %s succeeded.", settings.llm_model_fallback)
             except RetryError as exc2:
                 raise RuntimeError(
@@ -115,9 +136,10 @@ class SecurityAnalyzer:
             except GroqRateLimitError as exc2:
                 wait2 = _extract_wait_time(exc2)
                 wait_msg2 = f" Try again in {wait2}." if wait2 else ""
+                limit_kind = "per-minute token limit (TPM)" if _is_tpm_error(exc2) else "daily token limit (TPD)"
                 raise RuntimeError(
-                    f"Both models have reached their daily token limit (TPD). "
-                    f"Primary: {settings.llm_model}, Fallback: {settings.llm_model_fallback}.{wait_msg2}"
+                    f"Fallback model {settings.llm_model_fallback} hit its {limit_kind}.{wait_msg2} "
+                    f"Primary model {settings.llm_model} also exhausted."
                 ) from exc2
 
         logger.info("SecurityAnalyzer received LLM response")
@@ -149,23 +171,32 @@ class SecurityAnalyzer:
         """Invoke the fallback LLM with the same retry policy as the primary."""
         return self.llm_fallback.invoke(messages)
 
-    def _prepare_file_summary(self, files: list[dict]) -> str:
+    def _prepare_file_summary(
+        self,
+        files: list[dict],
+        max_files: int | None = None,
+        max_chars: int | None = None,
+    ) -> str:
         """Prepare a summary of files for analysis.
 
         Args:
             files: List of file dictionaries
+            max_files: Override for maximum number of files (defaults to settings.llm_max_files)
+            max_chars: Override for max chars per file (defaults to settings.llm_max_chars_per_file)
 
         Returns:
             Formatted file summary string
         """
+        limit_files = max_files if max_files is not None else settings.llm_max_files
+        limit_chars = max_chars if max_chars is not None else settings.llm_max_chars_per_file
         summary_parts = []
 
-        for file_dict in files[: settings.llm_max_files]:
+        for file_dict in files[:limit_files]:
             path = file_dict.get("path", "unknown")
             content = file_dict.get("content", "")
 
-            if len(content) > settings.llm_max_chars_per_file:
-                content = content[: settings.llm_max_chars_per_file] + "\n... [truncated]"
+            if len(content) > limit_chars:
+                content = content[:limit_chars] + "\n... [truncated]"
 
             summary_parts.append(f"FILE: {path}\n{content}\n" + "=" * 40)
 

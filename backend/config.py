@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     # 20 files × 1200 chars = 24k chars ≈ 6k tokens input; 4k output → ~10k total (safe).
     llm_max_files: int = 20
     llm_max_chars_per_file: int = 1200
+    # Fallback model (llama-3.1-8b-instant) has 6000 TPM on free tier.
+    # Budget: 1500 output + 10×800 chars ≈ 1500 + 2000 = 3500 tokens total (< 6000 TPM).
+    llm_fallback_max_tokens: int = 1500
+    llm_fallback_max_files: int = 10
+    llm_fallback_max_chars_per_file: int = 800
 
     # Feature flags
     enable_cors: bool = True

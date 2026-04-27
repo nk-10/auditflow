@@ -362,9 +362,9 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for step-by-step instructions cover
 
 ### Example Test Repositories
 
-- Small: https://github.com/pallets/flask
-- Medium: https://github.com/psf/requests
-- Large: https://github.com/psf/black
+- Small: https://github.com/mpirnat/lets-be-bad-guys
+- Medium: https://github.com/we45/Vulnerable-Flask-App
+- Large: https://github.com/adeyosemanputra/pygoat
 
 ## 📊 Supported Analysis
 
